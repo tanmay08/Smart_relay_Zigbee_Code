@@ -27,6 +27,22 @@ low, and OFF drives it high. Switch GPIOs use internal pull-ups and a closed
 wall switch pulls the input to GND (ON). Confirm these electrical levels match
 the relay driver circuitry and switch wiring on the final PCB before connecting
 mains voltage.
+Switch inputs are sampled every 10 ms and use a 30 ms debounce interval to
+reject contact bounce while keeping button response prompt. Physical changes
+update the relay locally and queue Zigbee state reports immediately; reports
+retry if the Zigbee stack is temporarily busy.
+
+Relay states are saved to NVS whenever a Zigbee command or physical switch
+changes a relay. At startup, relay GPIOs are initialized to their inactive
+level first; saved states are restored only after NVS, Zigbee, and GPIO
+initialization succeeds. A maintained physical switch is sampled for its
+binary sensor, but does not override the saved relay state until that switch
+position changes. Brownout detection is enabled to reset the ESP32 if its
+supply voltage falls below the configured threshold; it is not used to write
+flash at power loss, because voltage may disappear before such a write can
+complete. For predictable relay-off behavior while the ESP32 is unpowered or
+resetting, the relay driver circuit must also provide an external inactive-level
+pull resistor.
 
 ## Build and flash
 

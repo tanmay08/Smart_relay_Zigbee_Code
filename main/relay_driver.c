@@ -12,6 +12,14 @@ static const gpio_num_t s_relay_gpios[RELAY_COUNT] = {
 
 esp_err_t relay_driver_init(void)
 {
+    for (size_t i = 0; i < RELAY_COUNT; ++i) {
+        esp_err_t err = gpio_set_level(s_relay_gpios[i],
+                                       !RELAY_ACTIVE_LEVEL);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+
     const gpio_config_t config = {
         .pin_bit_mask = (1ULL << RELAY1_GPIO) | (1ULL << RELAY2_GPIO) |
                         (1ULL << RELAY3_GPIO) | (1ULL << RELAY4_GPIO),
@@ -20,18 +28,7 @@ esp_err_t relay_driver_init(void)
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
-    esp_err_t err = gpio_config(&config);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    for (size_t i = 0; i < RELAY_COUNT; ++i) {
-        err = gpio_set_level(s_relay_gpios[i], !RELAY_ACTIVE_LEVEL);
-        if (err != ESP_OK) {
-            return err;
-        }
-    }
-    return ESP_OK;
+    return gpio_config(&config);
 }
 
 esp_err_t relay_driver_set(size_t relay_index, bool on)

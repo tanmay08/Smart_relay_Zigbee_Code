@@ -6,10 +6,12 @@
  * Zigbee HA on/off relay example
  */
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_zigbee_ota.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 #include "ha/esp_zigbee_ha_standard.h"
 #include "zcl_utility.h"
@@ -25,11 +27,92 @@
 
 static const char *TAG = "ZIGBEE_RELAY";
 static TaskHandle_t s_switch_task_handle;
+static nvs_handle_t s_relay_state_nvs;
+static SemaphoreHandle_t s_relay_state_mutex;
+static uint8_t s_relay_state_mask;
 static esp_zb_zcl_ota_upgrade_client_variable_t s_ota_client_config = {
     .timer_query = HA_ESP_OTA_QUERY_INTERVAL_MINUTES,
     .hw_version = 1,
     .max_data_size = 64,
 };
+
+static esp_err_t relay_state_load(void)
+{
+    esp_err_t err = nvs_open("relay_state", NVS_READWRITE,
+                             &s_relay_state_nvs);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open relay-state storage: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs_get_u8(s_relay_state_nvs, "states", &s_relay_state_mask);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        s_relay_state_mask = 0;
+        ESP_LOGI(TAG, "No saved relay state; defaulting all relays to OFF");
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read saved relay state: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    const uint8_t valid_mask = (1U << RELAY_COUNT) - 1U;
+    if ((s_relay_state_mask & (uint8_t)~valid_mask) != 0) {
+        ESP_LOGW(TAG, "Saved relay state has invalid bits; clearing them");
+        s_relay_state_mask &= valid_mask;
+        err = nvs_set_u8(s_relay_state_nvs, "states", s_relay_state_mask);
+        if (err == ESP_OK) {
+            err = nvs_commit(s_relay_state_nvs);
+        }
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to repair saved relay state: %s",
+                     esp_err_to_name(err));
+            return err;
+        }
+    }
+
+    ESP_LOGI(TAG, "Loaded saved relay state mask 0x%02x",
+             s_relay_state_mask);
+    return ESP_OK;
+}
+
+static esp_err_t relay_state_save(size_t relay_index, bool on)
+{
+    if (relay_index >= RELAY_COUNT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (xSemaphoreTake(s_relay_state_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_FAIL;
+    }
+
+    uint8_t relay_bit = 1U << relay_index;
+    bool current_state = (s_relay_state_mask & relay_bit) != 0;
+    if (current_state == on) {
+        xSemaphoreGive(s_relay_state_mutex);
+        return ESP_OK;
+    }
+
+    if (on) {
+        s_relay_state_mask |= relay_bit;
+    } else {
+        s_relay_state_mask &= (uint8_t)~relay_bit;
+    }
+
+    esp_err_t err = nvs_set_u8(s_relay_state_nvs, "states",
+                               s_relay_state_mask);
+    if (err == ESP_OK) {
+        err = nvs_commit(s_relay_state_nvs);
+    }
+    xSemaphoreGive(s_relay_state_mutex);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to persist relay %u state: %s",
+                 (unsigned)(relay_index + 1), esp_err_to_name(err));
+    }
+    return err;
+}
 
 static uint8_t switch_endpoint(size_t switch_index)
 {
@@ -130,12 +213,25 @@ static esp_err_t sync_switch_state(size_t relay_index, bool on)
         return err;
     }
 
-    if (!esp_zb_lock_acquire(portMAX_DELAY)) {
-        ESP_LOGE(TAG, "Failed to acquire Zigbee lock while syncing relay %u",
-                 (unsigned)(relay_index + 1));
-        return ESP_FAIL;
+    err = relay_state_save(relay_index, on);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Switch %u changed; relay set to %s",
+                 (unsigned)(relay_index + 1), on ? "ON" : "OFF");
     }
-    err = report_relay_state(relay_index, on);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Relay %u changed but state save failed: %s",
+                 (unsigned)(relay_index + 1), esp_err_to_name(err));
+    }
+    return err;
+}
+
+static esp_err_t report_switch_state(size_t relay_index, bool on)
+{
+    if (!esp_zb_lock_acquire(pdMS_TO_TICKS(10))) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    esp_err_t err = report_relay_state(relay_index, on);
     if (err == ESP_OK) {
         err = set_switch_attribute(relay_index, on);
     }
@@ -143,20 +239,21 @@ static esp_err_t sync_switch_state(size_t relay_index, bool on)
         err = send_switch_report(relay_index);
     }
     esp_zb_lock_release();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to synchronize switch %u state: %s",
-                 (unsigned)(relay_index + 1), esp_err_to_name(err));
-    }
     return err;
 }
 
 static void switch_monitor_task(void *arg)
 {
     (void)arg;
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
     bool stable_state[RELAY_COUNT];
     bool candidate_state[RELAY_COUNT];
+    bool report_pending[RELAY_COUNT] = {false};
     TickType_t candidate_since[RELAY_COUNT];
+    TickType_t report_retry_since[RELAY_COUNT];
     TickType_t debounce_ticks = pdMS_TO_TICKS(SWITCH_DEBOUNCE_MS);
+    TickType_t report_retry_ticks = pdMS_TO_TICKS(50);
 
     for (size_t i = 0; i < RELAY_COUNT; ++i) {
         if (switch_driver_get_state(i, &stable_state[i]) != ESP_OK) {
@@ -165,6 +262,7 @@ static void switch_monitor_task(void *arg)
         }
         candidate_state[i] = stable_state[i];
         candidate_since[i] = xTaskGetTickCount();
+        report_retry_since[i] = candidate_since[i];
     }
 
     for (;;) {
@@ -183,6 +281,20 @@ static void switch_monitor_task(void *arg)
                        (TickType_t)(now - candidate_since[i]) >= debounce_ticks) {
                 stable_state[i] = candidate_state[i];
                 (void)sync_switch_state(i, stable_state[i]);
+                report_pending[i] = true;
+                report_retry_since[i] = now - report_retry_ticks;
+            }
+
+            if (report_pending[i] &&
+                (TickType_t)(now - report_retry_since[i]) >= report_retry_ticks) {
+                esp_err_t err = report_switch_state(i, stable_state[i]);
+                if (err == ESP_OK) {
+                    report_pending[i] = false;
+                } else {
+                    ESP_LOGW(TAG, "Zigbee report for switch %u will retry: %s",
+                             (unsigned)(i + 1), esp_err_to_name(err));
+                    report_retry_since[i] = now;
+                }
             }
         }
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -198,21 +310,48 @@ static esp_err_t deferred_driver_init(void)
         bool switch_on;
         ESP_RETURN_ON_ERROR(switch_driver_get_state(i, &switch_on), TAG,
                             "Failed to read switch during initialization");
-        ESP_RETURN_ON_ERROR(relay_driver_set(i, switch_on), TAG,
-                            "Failed to set relay from initial switch state");
-        if (set_relay_attribute(i, switch_on) != ESP_OK) {
-            return ESP_FAIL;
-        }
+        bool relay_on = (s_relay_state_mask & (1U << i)) != 0;
+        ESP_RETURN_ON_ERROR(set_relay_attribute(i, relay_on), TAG,
+                            "Failed to set initial relay state");
         ESP_RETURN_ON_ERROR(set_switch_attribute(i, switch_on), TAG,
                             "Failed to set initial switch sensor state");
     }
 
-    if (s_switch_task_handle == NULL &&
-        xTaskCreate(switch_monitor_task, "switch_monitor", 3072, NULL, 5,
+    return ESP_OK;
+}
+
+static esp_err_t restore_relay_states(void)
+{
+    if (s_switch_task_handle != NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (xTaskCreate(switch_monitor_task, "switch_monitor", 3072, NULL, 5,
                     &s_switch_task_handle) != pdPASS) {
         ESP_LOGE(TAG, "Failed to create switch monitor task");
         return ESP_ERR_NO_MEM;
     }
+
+    for (size_t i = 0; i < RELAY_COUNT; ++i) {
+        bool relay_on = (s_relay_state_mask & (1U << i)) != 0;
+        esp_err_t err = relay_driver_set(i, relay_on);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to restore relay %u; turning all relays off",
+                     (unsigned)(i + 1));
+            for (size_t j = 0; j < RELAY_COUNT; ++j) {
+                esp_err_t off_err = relay_driver_set(j, false);
+                if (off_err != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to turn relay %u off: %s",
+                             (unsigned)(j + 1), esp_err_to_name(off_err));
+                }
+            }
+            vTaskDelete(s_switch_task_handle);
+            s_switch_task_handle = NULL;
+            return err;
+        }
+    }
+
+    xTaskNotifyGive(s_switch_task_handle);
     return ESP_OK;
 }
 
@@ -270,6 +409,12 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to configure Zigbee OTA query interval: %s",
                          esp_err_to_name(err));
+            }
+            err = restore_relay_states();
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to restore relay outputs: %s",
+                         esp_err_to_name(err));
+                break;
             }
             ESP_LOGI(TAG, "Relay and switch drivers initialized");
             if (esp_zb_bdb_is_factory_new()) {
@@ -335,11 +480,13 @@ static esp_err_t zb_attribute_handler(
 
     bool on = *(bool *)message->attribute.data.value;
     esp_err_t err = relay_driver_set(relay_index, on);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Relay %u set to %s", (unsigned)(relay_index + 1),
-                 on ? "ON" : "OFF");
+    if (err != ESP_OK) {
+        return err;
     }
-    return err;
+    (void)relay_state_save(relay_index, on);
+    ESP_LOGI(TAG, "Relay %u set to %s", (unsigned)(relay_index + 1),
+             on ? "ON" : "OFF");
+    return ESP_OK;
 }
 
 static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
@@ -477,6 +624,9 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+    s_relay_state_mutex = xSemaphoreCreateMutex();
+    ESP_ERROR_CHECK(s_relay_state_mutex == NULL ? ESP_ERR_NO_MEM : ESP_OK);
+    ESP_ERROR_CHECK(relay_state_load());
     ESP_ERROR_CHECK(esp_zb_platform_config(&config));
     ESP_ERROR_CHECK(xTaskCreate(esp_zb_task, "Zigbee_main", 6144, NULL, 5,
                                 NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
