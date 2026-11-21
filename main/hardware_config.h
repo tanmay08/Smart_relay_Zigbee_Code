@@ -1,0 +1,17 @@
+#pragma once
+
+#define RELAY1_GPIO 17
+#define RELAY2_GPIO 19
+#define RELAY3_GPIO 20
+#define RELAY4_GPIO 18
+
+#define SWITCH1_GPIO 21
+#define SWITCH2_GPIO 22
+#define SWITCH3_GPIO 23
+#define SWITCH4_GPIO 16
+
+#define RELAY_ACTIVE_LEVEL 1
+#define SWITCH_ON_LEVEL 0
+#define SWITCH_DEBOUNCE_MS 50
+
+#define RELAY_COUNT 4
