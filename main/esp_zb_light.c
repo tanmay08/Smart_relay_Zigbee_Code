@@ -143,6 +143,10 @@ static esp_err_t sync_switch_state(size_t relay_index, bool on)
         err = send_switch_report(relay_index);
     }
     esp_zb_lock_release();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to synchronize switch %u state: %s",
+                 (unsigned)(relay_index + 1), esp_err_to_name(err));
+    }
     return err;
 }
 
@@ -465,9 +469,15 @@ void app_main(void)
         .radio_config = ESP_ZB_DEFAULT_RADIO_CONFIG(),
         .host_config = ESP_ZB_DEFAULT_HOST_CONFIG(),
     };
-    ESP_ERROR_CHECK(nvs_flash_init());
-    ESP_ERROR_CHECK(esp_zb_platform_config(&config));
-    if (xTaskCreate(esp_zb_task, "Zigbee_main", 6144, NULL, 5, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create Zigbee task");
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+        err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS requires recovery; erasing NVS partition");
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
     }
+    ESP_ERROR_CHECK(err);
+    ESP_ERROR_CHECK(esp_zb_platform_config(&config));
+    ESP_ERROR_CHECK(xTaskCreate(esp_zb_task, "Zigbee_main", 6144, NULL, 5,
+                                NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 }

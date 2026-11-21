@@ -22,9 +22,10 @@ board mapping:
 Relay endpoints are 10–13. Switch-state binary sensor endpoints are 20–23 and
 publish their `PresentValue` from the corresponding maintained switch input.
 
-Relays are active-high. Switch GPIOs use internal pull-ups and a closed wall
-switch pulls the input to GND (ON). Confirm these electrical levels match the
-relay driver circuitry and switch wiring on the final PCB before connecting
+Relay outputs are active-low: Zigbee/Home Assistant ON drives the relay GPIO
+low, and OFF drives it high. Switch GPIOs use internal pull-ups and a closed
+wall switch pulls the input to GND (ON). Confirm these electrical levels match
+the relay driver circuitry and switch wiring on the final PCB before connecting
 mains voltage.
 
 ## Build and flash
@@ -34,8 +35,14 @@ Coordinator/Router stack variant. Build and flash with ESP-IDF:
 
 ```text
 idf.py build
+idf.py -p PORT erase-flash
 idf.py -p PORT flash monitor
 ```
+
+Erasing flash clears Zigbee network credentials and all other device data.
+After flashing, remove the old device entry from Home Assistant if it remains,
+then pair the relay again. Use this full erase-and-flash sequence when a clean
+Zigbee rejoin is needed; normal firmware updates do not require erasing flash.
 
 ### Zigbee OTA updates
 
@@ -78,9 +85,9 @@ that same version to the image packer. Keep both values identical; every OTA
 version must be greater than the version currently running on the device.
 
 The partition table has two 1.375 MiB application slots. Install this OTA-ready
-partition table and firmware once over USB/serial after `idf.py erase-flash`;
-this initial erase removes saved Zigbee network credentials, so pair the relay
-again. Subsequent firmware updates can use Zigbee OTA without erasing flash.
+partition table and firmware over USB/serial after `idf.py erase-flash`; this
+erase removes saved Zigbee network credentials, so pair the relay again.
+Subsequent firmware updates can use Zigbee OTA without erasing flash.
 
 For boards connected through their built-in USB Serial/JTAG connector, select
 the corresponding COM port and use UART/serial flashing. The application console
