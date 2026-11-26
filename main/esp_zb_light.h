@@ -20,7 +20,7 @@
 #define HA_ESP_SWITCH_ENDPOINT_BASE    20                                   /* First of the four switch sensor endpoints */
 #define HA_ESP_OTA_MANUFACTURER_CODE   0x131B
 #define HA_ESP_OTA_IMAGE_TYPE          0x0001
-#define HA_ESP_OTA_FILE_VERSION        2
+#define HA_ESP_OTA_FILE_VERSION        3
 #define HA_ESP_OTA_QUERY_INTERVAL_MINUTES 60
 #define HA_ESP_ON_OFF_SENSOR_DEVICE_ID 0x000E                               /* Zigbee HA On/Off Sensor device type */
 #define ESP_ZB_PRIMARY_CHANNEL_MASK     ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK /* Zigbee primary channel mask use in the example */

@@ -62,23 +62,70 @@ Zigbee rejoin is needed; normal firmware updates do not require erasing flash.
 
 ### Zigbee OTA updates
 
-The Zigbee OTA Upgrade client is attached to relay endpoint 10. It checks for
-updates hourly. Images must use manufacturer code `0x131B`, image type `0x0001`,
-and a file version greater than `HA_ESP_OTA_FILE_VERSION` in
-[`main/esp_zb_light.h`](main/esp_zb_light.h). The packaged Zigbee image contains
-the ESP-IDF application binary as its OTA upgrade-image subelement.
+This device receives firmware through the Zigbee OTA Upgrade cluster; it does
+not download the image over Wi-Fi. The OTA client is on relay endpoint 10 and
+queries for available images hourly. Home Assistant must use ZHA, and the
+device must be powered, joined to the same Zigbee network as the coordinator,
+and in reliable radio range for the update.
 
-Version 2 is the first OTA candidate for devices running version 1. Build the
-firmware and package it with the same version:
+#### 1. Confirm the device is ready for OTA
+
+OTA requires the two application slots in this project's partition table and
+firmware that includes the Zigbee OTA client. If the device already runs
+OTA-capable firmware with this partition table, skip this step. If it runs
+older firmware or uses a different partition table, install this project over
+USB/serial once:
 
 ```text
 idf.py build
-python tools\create_ota_image.py build\Zigbee_Smart_Switch_Relay.bin --version 2 --output build\relay-v2.ota
+idf.py -p PORT erase-flash
+idf.py -p PORT flash monitor
 ```
 
-To serve the image from Home Assistant, copy `relay-v2.ota` into
-`/config/ota/` and add this legacy ZHA configuration to `configuration.yaml`
-(merge it with any existing `zha:` section rather than creating a duplicate):
+Replace `PORT` with the device's serial port (for example, `COM5`). Erasing
+flash deletes Zigbee pairing and saved settings, so pair the device with ZHA
+again afterward. **Do not erase flash for normal OTA releases.** OTA updates
+replace only the application; they do not update the bootloader or partition
+table.
+
+#### 2. Build and package the release
+
+The OTA file version must be greater than the version currently running on the
+device. It must also match in both places:
+
+1. Set `HA_ESP_OTA_FILE_VERSION` in
+   [`main/esp_zb_light.h`](main/esp_zb_light.h) to the new release number.
+2. Build the firmware and pass that exact same number to the image packer.
+
+The checked-in source currently uses version `3`. For devices already running
+version 2, build and package version 3 as follows:
+
+```text
+idf.py build
+python tools\create_ota_image.py build\Zigbee_Smart_Switch_Relay.bin --version 3 --output build\relay-v3.ota
+```
+
+For the next release after version 3, change the macro to `4`, rebuild, and
+package with `--version 4`. A version 3 image is also newer than version 1,
+provided that device already has OTA-capable firmware and the OTA-ready
+partition table. For each release, use the same number in the firmware and
+image. Do not reuse a version or package with a number different from the
+firmware: the device ignores images that are not newer or whose metadata does
+not match.
+
+The packer wraps the ESP-IDF application binary in the Zigbee OTA image format.
+The image uses manufacturer code `0x131B` and image type `0x0001`. Keep the
+generated `.ota` extension and do not modify the image contents.
+
+#### 3. Make the image available to ZHA
+
+On the Home Assistant host, create `/config/ota/` if it does not exist and copy
+the generated image there. For the example above, the final path is
+`/config/ota/relay-v3.ota`.
+
+Configure ZHA's local OTA file provider in `configuration.yaml`. If the file
+already has a `zha:` section, merge the `zigpy_config` contents into it; do not
+add a second top-level `zha:` key:
 
 ```yaml
 zha:
@@ -90,20 +137,37 @@ zha:
           warning: "I understand I can *destroy* my devices by enabling OTA updates from files. Some OTA updates can be mistakenly applied to the wrong device, breaking it. I am consciously using this at my own risk."
 ```
 
-Restart Home Assistant so ZHA loads the local image provider. Open the relay's
-ZHA device page and use its firmware update action to check for and install the
-available image. Keep the relay powered and within reliable Zigbee range until
-it reboots. The bootloader validates the new application and rolls back
-automatically if the new firmware does not complete its first startup.
+This is the legacy, YAML-based ZHA provider configuration. Restart Home
+Assistant after changing it so ZHA discovers the provider and image.
 
-For subsequent releases, increase `HA_ESP_OTA_FILE_VERSION`, rebuild, and pass
-that same version to the image packer. Keep both values identical; every OTA
-version must be greater than the version currently running on the device.
+#### 4. Start and monitor the update
 
-The partition table has two 1.375 MiB application slots. Install this OTA-ready
-partition table and firmware over USB/serial after `idf.py erase-flash`; this
-erase removes saved Zigbee network credentials, so pair the relay again.
-Subsequent firmware updates can use Zigbee OTA without erasing flash.
+1. In Home Assistant, open the relay in **Settings → Devices & services →
+   ZHA → Devices**.
+2. On the relay's device page, find **Firmware** in the **Configuration**
+   section. If ZHA has found the image, Home Assistant will show an available
+   version and an update action there and/or in its update notification. Open
+   the update entry, confirm the offered version matches your release, and
+   choose **Update**.
+3. If the Firmware row says **Unknown** and there is no update action, no OTA
+   transfer is in progress and no usable update is currently being offered.
+   The hourly query can take up to an hour; after configuring the provider,
+   restart Home Assistant and allow time for the next query.
+4. Keep the relay powered and within reliable Zigbee range. Do not unplug it
+   or interrupt the coordinator while the image is transferring or the relay
+   is rebooting.
+5. Wait for the relay to restart and rejoin. The bootloader validates the new
+   application; if the new firmware fails its first startup, rollback restores
+   the previously working application.
+
+If Firmware remains **Unknown** or no update is offered after the next query,
+check that the `.ota` file is under `/config/ota/`, the provider configuration
+is valid and Home Assistant was restarted, and the image version is newer than
+the running firmware and matches `HA_ESP_OTA_FILE_VERSION`. Also confirm the
+device has OTA-capable firmware and the OTA-ready partition table. If an update
+fails, keep the device powered, check the device/coordinator logs, and retry
+after correcting the image or radio-range issue. A normal failed OTA does not
+require erasing flash or re-pairing.
 
 For boards connected through their built-in USB Serial/JTAG connector, select
 the corresponding COM port and use UART/serial flashing. The application console

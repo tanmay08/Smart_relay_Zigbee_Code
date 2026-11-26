@@ -338,7 +338,8 @@ static esp_err_t ota_finish(void)
 
     bool raw_firmware_complete =
         s_stream_state == OTA_STREAM_RAW_FIRMWARE &&
-        s_firmware_bytes_written > 0;
+        s_firmware_bytes_written > 0 &&
+        s_ota_bytes_received == s_advertised_ota_size;
     bool container_complete =
         s_stream_state == OTA_STREAM_COMPLETE &&
         s_ota_bytes_received == s_declared_ota_size;
